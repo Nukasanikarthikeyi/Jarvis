@@ -19,7 +19,10 @@ import threading
 import time
 
 ROOT = pathlib.Path(__file__).resolve().parent
-VAULT = pathlib.Path(os.path.expanduser(os.environ.get("JARVIS_VAULT", ROOT / "vault")))
+# Where settings and data live: next to the code, or JARVIS_HOME (the Mac app
+# sets it, so its own bundle is never written to).
+DATA = pathlib.Path(os.path.expanduser(os.environ.get("JARVIS_HOME") or ROOT))
+VAULT = pathlib.Path(os.path.expanduser(os.environ.get("JARVIS_VAULT") or DATA / "vault"))
 
 WIKILINK = re.compile(r"\[\[([^\]|#]+)(?:[|#][^\]]*)?\]\]")
 FRONTMATTER = re.compile(r"\A---\s*\n(.*?)\n---\s*\n", re.S)

@@ -19,6 +19,7 @@ import atexit
 import collections
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -33,6 +34,13 @@ WORKDIR = os.path.expanduser(os.environ.get("JARVIS_WORKDIR", os.getcwd()))
 # otherwise. This also lets JARVIS take unattended actions (send/delete/shell) —
 # see the Security notes in README. Set JARVIS_PERMISSION=acceptEdits to narrow it.
 PERMISSION = os.environ.get("JARVIS_PERMISSION", "bypassPermissions").strip()
+# JARVIS_TOOLS narrows Claude to the named built-in tools and approves exactly
+# those, e.g. "WebSearch,WebFetch" for an assistant that can look things up but
+# cannot run commands or touch files. Empty leaves the tool set alone.
+TOOLS = os.environ.get("JARVIS_TOOLS", "").strip()
+# JARVIS_MCP=off starts Claude without any MCP connectors: nothing outside the
+# tools above, and about two seconds faster to start.
+MCP = os.environ.get("JARVIS_MCP", "on").strip().lower() not in {"off", "0", "false", "no"}
 RUNTIME = os.environ.get("JARVIS_RUNTIME", "auto").strip().lower()   # auto|claude|mock
 IDLE_TIMEOUT = int(os.environ.get("JARVIS_TIMEOUT", "180"))
 RAW_LOG = os.environ.get("JARVIS_RAW_LOG", "").strip()
@@ -105,6 +113,10 @@ def build_command(session_id=None, system=None):
         cmd += ["--model", MODEL]
     if PERMISSION:
         cmd += ["--permission-mode", PERMISSION]
+    if TOOLS:
+        cmd += ["--tools", TOOLS, "--allowedTools", TOOLS]
+    if not MCP:
+        cmd += ["--strict-mcp-config"]
     if system:
         cmd += ["--append-system-prompt", system]
     return cmd
@@ -238,7 +250,8 @@ def _discard(brain):
 
 def _acquire(session_id, system):
     """The live process if it can take this turn, otherwise a new one."""
-    global _BRAIN
+    global _BRAIN, _SYSTEM
+    _SYSTEM = system
     with _BRAIN_LOCK:
         if _BRAIN is not None and not _BRAIN.fits(session_id, system):
             _discard(_BRAIN)
@@ -250,7 +263,8 @@ def _acquire(session_id, system):
 def prewarm(session_id=None, system=None):
     """Start the process before it is needed, so a question never waits for the
     CLI to launch. Does nothing if one is already up."""
-    global _BRAIN
+    global _BRAIN, _SYSTEM
+    _SYSTEM = system
     with _BRAIN_LOCK:
         if _BRAIN is not None and _BRAIN.alive():
             return
@@ -275,6 +289,102 @@ def cancel_active():
 def _shutdown():
     with _BRAIN_LOCK:
         _discard(_BRAIN)
+
+
+# ── Claude account ───────────────────────────────────────────────
+# JARVIS has no sign-in of its own: it answers through the claude CLI, on the
+# CLI's login. These let the HUD show whether that is connected and run the
+# sign-in itself, so nobody has to open a terminal to use the app.
+_SYSTEM = None           # the system prompt the warm process was last started with
+# Shown and spoken in place of the CLI's own "Not logged in · Please run /login".
+NOT_SIGNED_IN = "Claude is not connected. Please sign in, then ask me again."
+_LOGIN = {"proc": None, "lines": collections.deque(maxlen=40), "rc": None}
+_LOGIN_LOCK = threading.Lock()
+
+
+def account():
+    """Is the CLI there, and is it signed in? Never returns the e-mail or a token."""
+    ok, detail = _can_launch()
+    if not ok:
+        return dict(installed=False, signed_in=False)
+    info = {}
+    try:
+        p = subprocess.run(_claude_base() + ["auth", "status"], cwd=WORKDIR, text=True, env=_env(),
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
+        info = json.loads(p.stdout or "{}")
+    except Exception:  # noqa: BLE001 — an old CLI without `auth status`, or junk output
+        pass
+    return dict(installed=True, version=detail, signed_in=bool(info.get("loggedIn")),
+                method=info.get("authMethod"), plan=info.get("subscriptionType"))
+
+
+def login_start():
+    """Begin the CLI's sign-in. Always --claudeai: the subscription login, never
+    the Console one, which bills per token. The CLI opens the browser itself."""
+    with _LOGIN_LOCK:
+        proc = _LOGIN["proc"]
+        if proc is not None and proc.poll() is None:
+            return False                       # one sign-in at a time
+        _LOGIN["lines"].clear()
+        _LOGIN["rc"] = None
+        proc = subprocess.Popen(_claude_base() + ["auth", "login", "--claudeai"], cwd=WORKDIR,
+                                text=True, bufsize=1, env=_env(), stdin=subprocess.PIPE,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        _LOGIN["proc"] = proc
+
+    def follow():
+        for ln in proc.stdout:
+            _LOGIN["lines"].append(ln.rstrip())
+        rc = proc.wait()
+        with _LOGIN_LOCK:
+            if _LOGIN["proc"] is proc:
+                _LOGIN["rc"] = rc
+        if rc == 0:
+            # The warm process was started before there was a login; replace it.
+            with _BRAIN_LOCK:
+                if _TURN is None:
+                    _discard(_BRAIN)
+            prewarm(None, _SYSTEM)
+
+    threading.Thread(target=follow, daemon=True).start()
+    give_up = threading.Timer(600, lambda: proc.poll() is None and proc.terminate())
+    give_up.daemon = True
+    give_up.start()                            # an abandoned sign-in does not linger
+    return True
+
+
+def login_code(code):
+    """Some browsers end the sign-in by showing a code to paste back."""
+    proc = _LOGIN["proc"]
+    if proc is None or proc.poll() is not None:
+        return False
+    try:
+        proc.stdin.write(str(code).strip() + "\n")
+        proc.stdin.flush()
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def login_cancel():
+    proc = _LOGIN["proc"]
+    if proc is None or proc.poll() is not None:
+        return False
+    proc.terminate()
+    return True
+
+
+def login_state():
+    proc = _LOGIN["proc"]
+    link, refused = None, False
+    for ln in list(_LOGIN["lines"]):
+        found = re.search(r"https://\S+", ln)
+        if found:
+            link = found.group(0)          # the page to open if the browser did not
+        if "invalid code" in ln.lower():
+            refused = True                 # a pasted code the CLI turned down
+    return dict(running=proc is not None and proc.poll() is None,
+                done=_LOGIN["rc"] is not None, ok=_LOGIN["rc"] == 0, url=link, refused=refused)
 
 
 def run_claude(message, session_id=None, system=None, context=None):
@@ -310,6 +420,7 @@ def _run_locked(message, session_id=None, system=None, context=None):
     text_seen = False
     first = True
     finished = False            # this turn's `result` arrived: the process is idle again
+    needs_login = False         # the CLI answered for itself: there is no usable login
     last = time.monotonic()
 
     try:
@@ -373,6 +484,9 @@ def _run_locked(message, session_id=None, system=None, context=None):
                 continue
 
             if kind == "assistant":
+                if ev.get("error") == "authentication_failed":
+                    needs_login = True      # not Claude speaking; see NOT_SIGNED_IN
+                    continue
                 u = (ev.get("message") or {}).get("usage") or {}
                 if u:
                     last_usage = u
@@ -398,6 +512,11 @@ def _run_locked(message, session_id=None, system=None, context=None):
                 continue
 
             if kind == "result":
+                if needs_login:
+                    # Left unfinished on purpose: this process started without a
+                    # login, so it is discarded and the next turn gets a new one.
+                    yield dict(t="error", message=NOT_SIGNED_IN, login=True)
+                    return
                 usage = ev.get("usage") or last_usage or {}
                 if ev.get("subtype") != "success" and not text_seen:
                     yield dict(t="error", message=str(ev.get("result") or "Claude returned an error")[:400])

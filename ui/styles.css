@@ -99,10 +99,34 @@ body::before{ /* circuit traces, behind everything */
 .pill span{font-family:var(--display);font-size:8.5px;color:var(--cy);text-transform:uppercase;
   letter-spacing:.22em}
 .pill b{color:var(--ink);font-weight:500;overflow:hidden;text-overflow:ellipsis}
+.pill.link{cursor:pointer}
+.pill.link:hover b,.pill.link:focus-visible b{color:var(--cy-hot);text-decoration:underline}
 .dot{width:7px;height:7px;border-radius:50%;background:var(--ink-dim);flex:0 0 auto}
 .dot.ok{background:var(--cy);box-shadow:0 0 8px var(--cy)}
 .dot.warn{background:var(--amber);box-shadow:0 0 8px var(--amber)}
 .dot.hot{background:var(--cy-hot);box-shadow:0 0 10px var(--cy)}
+
+/* ── Claude account panel ──────────────────── */
+/* Drops from the Brain read-out. It is where the app is connected to Claude. */
+.account{position:absolute;top:132px;right:18px;z-index:20;width:380px;max-width:calc(100vw - 36px);
+  background:rgba(2,14,20,.96);border:1px solid var(--line-hot);border-radius:2px;
+  padding:13px 14px 12px;box-shadow:var(--glow),0 18px 40px rgba(0,0,0,.6)}
+.account[hidden],.demo-badge[hidden]{display:none}
+.account h2{font-family:var(--display);font-size:9.5px;font-weight:700;letter-spacing:.3em;
+  text-transform:uppercase;color:var(--cy);margin-bottom:10px;display:flex;
+  justify-content:space-between;align-items:center;text-shadow:0 0 10px rgba(25,232,242,.5)}
+.acctstate{font-size:13px;line-height:1.5;color:var(--ink);margin-bottom:11px}
+.acctstate b{color:var(--cy-hot);font-weight:600}
+.acctrow{display:flex;align-items:center;gap:8px;margin-bottom:9px;flex-wrap:wrap}
+.acctrow[hidden]{display:none}
+.acctrow input{flex:1;min-width:140px;background:rgba(8,40,52,.5);border:1px solid var(--line);
+  border-radius:2px;color:var(--ink);font-family:var(--mono);font-size:11px;padding:8px 9px;outline:none}
+.acctrow input:focus{border-color:var(--line-hot)}
+.acctlink{font-size:11px;color:var(--cy);text-decoration:underline;cursor:pointer}
+.acctlink[hidden]{display:none}
+.account .hint code{display:block;margin:7px 0 2px;padding:7px 9px;font-family:var(--mono);
+  font-size:10.5px;color:var(--cy-hot);background:rgba(8,40,52,.5);border:1px solid var(--line);
+  user-select:all;word-break:break-all}
 
 /* ── layout ────────────────────────────────── */
 /* The stage keeps a floor. If it is squeezed to a few pixels while the page

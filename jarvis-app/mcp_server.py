@@ -19,7 +19,8 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parent.parent     # the project, one level up from jarvis-app/
 
 # The HUD server takes JARVIS_VAULT from .env; follow it to the same vault.
-_env = ROOT / ".env"
+# The .env sits next to the code, or in JARVIS_HOME when the Mac app runs it.
+_env = pathlib.Path(os.path.expanduser(os.environ.get("JARVIS_HOME") or ROOT)) / ".env"
 if _env.exists():
     for _line in _env.read_text(encoding="utf-8").splitlines():
         _line = _line.strip()

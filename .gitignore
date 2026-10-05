@@ -3,6 +3,7 @@ state.json
 __pycache__/
 *.pyc
 raw-*.log
+dist/
 
 # What JARVIS has been told to remember is personal. It stays on this machine
 # rather than going to the remote with the rest of the vault.

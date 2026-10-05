@@ -204,13 +204,15 @@ async function loadStatus() {
   try {
     var s = await (await fetch('/api/status', { headers: headers() })).json();
     $('#pGateway').textContent = 'online :' + location.port;
-    $('#pBrain').textContent = s.runtime === 'claude' ? (s.version || 'Claude CLI') : 'MOCK';
+    Account.version = s.runtime === 'claude' ? (s.version || 'Claude CLI') : null;
+    Account.paint();
     $('#pVoice').textContent = s.server_voice ? 'Fish Audio' : 'browser';
     document.querySelectorAll('.pill .dot')[2].className = 'dot ' + (s.server_voice ? 'ok' : 'warn');
     $('#sModel').textContent = s.model;
     $('#cliBadge').textContent = s.runtime === 'claude' ? 'CLAUDE CLI' : 'CLI OFFLINE';
     window.__serverVoice = s.server_voice;
     window.__serverSTT = s.server_stt;
+    $('#demoBadge').hidden = !s.demo;          // the scripted demo lines are switched on
     if (s.listener) $('#btnMic').title = 'Listening via ' + s.listener;
   } catch (e) { $('#pGateway').textContent = 'offline'; }
 }
@@ -333,6 +335,10 @@ function handleEvent(ev) {
     case 'error':
       log('error', 'ERROR', ev.message || '');
       answerBubble.textContent = ev.message || 'error';
+      if (ev.login || /not logged in|\/login/i.test(ev.message || '')) {   // Claude is not connected
+        Account.open();
+        if (speech) speech.feed(ev.message + ' ');   // said aloud too: the question may have been spoken
+      }
       break;
     case 'complete':
       if (ev.session_id) $('#sSession').textContent = String(ev.session_id).slice(0, 8);
@@ -786,6 +792,127 @@ function setupMic() {
   };
 }
 
+/* ── Claude account ───────────────────────────
+   JARVIS answers through the Claude Code CLI, on that CLI's own sign-in. This
+   panel shows whether it is connected and runs the sign-in: the CLI opens the
+   browser, you approve there, and the panel notices when it is done. */
+var Account = {
+  info: null, version: null, poll: 0,
+
+  /* the Brain read-out in the header */
+  paint: function () {
+    var a = Account.info, label = Account.version || 'checking…', ok = true;
+    if (a && a.installed === false) { label = 'not installed'; ok = false; }
+    else if (a && !a.signed_in) { label = 'sign in'; ok = false; }
+    else if (a) { label = 'Claude' + (a.plan ? ' · ' + a.plan : ''); }
+    $('#pBrain').textContent = label;
+    $('#brainDot').className = 'dot ' + (ok ? 'ok' : 'warn');
+  },
+
+  render: function () {
+    var a = Account.info || {}, login = a.login || {};
+    var state = $('#accountState'), hint = $('#accountHint'), btn = $('#btnSignIn'), link = $('#accountLink');
+    $('#accountCode').hidden = !login.running;
+    link.hidden = !(login.running && login.url);
+    if (login.url) link.href = login.url;
+    btn.hidden = !!login.running;
+    btn.textContent = 'Sign in with Claude';
+    btn.className = 'send';
+    if (a.installed === false) {
+      state.innerHTML = 'Claude Code is <b>not installed</b> on this Mac. JARVIS needs it to think.';
+      hint.innerHTML = 'Paste this into Terminal, then reopen JARVIS:'
+        + '<code>curl -fsSL https://claude.ai/install.sh | bash</code>';
+      btn.hidden = true;
+    } else if (login.running) {
+      state.innerHTML = 'Waiting for you to <b>approve the sign-in</b> in your browser…';
+      hint.textContent = login.refused
+        ? 'That code was not accepted. Copy the whole code from the browser and try again.'
+        : 'This panel updates by itself when you are done.';
+    } else if (a.signed_in && a.method === 'claude.ai') {
+      var plan = a.plan ? a.plan.charAt(0).toUpperCase() + a.plan.slice(1) + ' plan' : 'subscription';
+      state.innerHTML = '<b>Connected</b> to your Claude ' + esc(plan) + '.';
+      btn.textContent = 'Sign in again';
+      btn.className = 'mic';
+      hint.textContent = 'Use this to switch to a different Claude account.';
+    } else if (a.signed_in) {
+      state.innerHTML = /api|console/i.test(a.method || '')
+        ? 'Connected with an <b>API key</b>, which is billed per use.'
+        : '<b>Connected</b> to Claude.';
+      hint.textContent = 'Sign in with your Claude subscription to use your plan instead.';
+    } else {
+      state.innerHTML = '<b>Not connected.</b> JARVIS answers through your Claude subscription.';
+      hint.textContent = login.done && !login.ok
+        ? 'That sign-in did not finish. Try again.'
+        : 'Your browser will open. Approve the sign-in there.';
+    }
+  },
+
+  refresh: async function () {
+    try {
+      Account.info = await (await fetch('/api/claude', { headers: headers() })).json();
+    } catch (e) { return null; }
+    Account.paint();
+    Account.render();
+    return Account.info;
+  },
+
+  open: function () { $('#account').hidden = false; Account.refresh(); },
+  close: function () { $('#account').hidden = true; },
+
+  signIn: async function () {
+    var res = await fetch('/api/claude/login', {
+      method: 'POST', headers: headers({ 'content-type': 'application/json' }), body: '{}'
+    });
+    var data = await res.json();
+    if (!res.ok) { $('#accountHint').textContent = data.error || 'Could not start the sign-in.'; return; }
+    Account.info = Object.assign(Account.info || {}, { login: data.login });
+    Account.render();
+    log('note', 'CLAUDE', 'sign-in started — approve it in your browser');
+    clearInterval(Account.poll);
+    Account.poll = setInterval(Account.watch, 1500);
+  },
+
+  watch: async function () {
+    var data;
+    try { data = await (await fetch('/api/claude?login=1', { headers: headers() })).json(); }
+    catch (e) { return; }
+    Account.info = Object.assign(Account.info || {}, { login: data.login });
+    if (data.login.running) { Account.render(); return; }
+    clearInterval(Account.poll);
+    await Account.refresh();
+    log(data.login.ok ? 'ok' : 'error', 'CLAUDE', data.login.ok ? 'signed in' : 'sign-in did not finish');
+  },
+
+  /* some browsers end the sign-in by showing a code instead of returning */
+  sendCode: function () {
+    var code = $('#accountCodeInput').value.trim();
+    if (!code) return;
+    $('#accountCodeInput').value = '';
+    fetch('/api/claude/code', {
+      method: 'POST', headers: headers({ 'content-type': 'application/json' }),
+      body: JSON.stringify({ code: code })
+    });
+  },
+
+  cancel: function () {
+    fetch('/api/claude/cancel', { method: 'POST', headers: headers({ 'content-type': 'application/json' }), body: '{}' });
+  }
+};
+
+function setupAccount() {
+  var pill = $('#pillBrain');
+  var toggle = function () { if ($('#account').hidden) Account.open(); else Account.close(); };
+  pill.onclick = toggle;
+  pill.onkeydown = function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } };
+  $('#btnAccountClose').onclick = Account.close;
+  $('#btnSignIn').onclick = Account.signIn;
+  $('#btnAccountCode').onclick = Account.sendCode;
+  $('#accountCodeInput').addEventListener('keydown', function (e) { if (e.key === 'Enter') Account.sendCode(); });
+  $('#btnAccountCancel').onclick = Account.cancel;
+  // Someone opening JARVIS for the first time sees what is missing straight away.
+  Account.refresh().then(function (a) { if (a && (a.installed === false || !a.signed_in)) Account.open(); });
+}
+
 /* ── boot ─────────────────────────────────── */
 window.addEventListener('DOMContentLoaded', function () {
   graph = new MemoryGraph($('#graph'), {
@@ -807,6 +934,7 @@ window.addEventListener('DOMContentLoaded', function () {
   loadStatus();
   loadGraph(false);
   setupMic();
+  setupAccount();
   setVoiceState('IDLE', '');
 
   $('#btnSend').onclick = function () { var v = $('#ask').value; $('#ask').value = ''; transmit(v); };

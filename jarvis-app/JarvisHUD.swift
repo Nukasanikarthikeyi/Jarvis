@@ -1,23 +1,42 @@
 // JARVIS HUD — the HUD in a window of its own.
 //
-// Starts the JARVIS server from the project folder if it is not already
-// running, shows it in a web view, and stops the server again on quit (only if
-// this app was the one that started it). Built by jarvis-app/build.sh; no Xcode
-// project, no dependencies.
+// Starts the JARVIS server if it is not already running, shows it in a web
+// view, and stops the server again on quit (only if this app was the one that
+// started it). Built by jarvis-app/build.sh; no Xcode project, no dependencies.
+//
+// A standalone build carries the server, the interface and a sample vault
+// inside the app, and keeps everything that changes — settings, vault, memory —
+// in ~/Library/Application Support/JARVIS HUD, never inside the bundle.
 
 import Cocoa
 import WebKit
 
-/// The folder holding server.py and start.sh. Baked into Info.plist at build
-/// time; JARVIS_PROJECT overrides it.
+let environment = ProcessInfo.processInfo.environment
+
+/// The copy of JARVIS a standalone build carries.
+let bundledPath = (Bundle.main.resourcePath ?? "") + "/jarvis"
+
+/// The folder holding server.py and start.sh: the project a linked build was
+/// made from (Info.plist), or the copy inside the app.
 let projectPath: String = {
-    if let p = ProcessInfo.processInfo.environment["JARVIS_PROJECT"], !p.isEmpty { return p }
-    return (Bundle.main.object(forInfoDictionaryKey: "JarvisProjectPath") as? String) ?? ""
+    if let p = environment["JARVIS_PROJECT"], !p.isEmpty { return p }
+    if let p = Bundle.main.object(forInfoDictionaryKey: "JarvisProjectPath") as? String, !p.isEmpty { return p }
+    return bundledPath
 }()
 
-/// JARVIS_PORT from the project's .env, the same place the server reads it.
+/// Where settings, vault and memory live. A linked build keeps them in the
+/// project folder; a standalone one keeps them outside the app.
+let dataPath: String = {
+    if let p = environment["JARVIS_HOME"], !p.isEmpty { return p }
+    if projectPath == bundledPath { return NSHomeDirectory() + "/Library/Application Support/JARVIS HUD" }
+    return projectPath
+}()
+let keepsDataApart = dataPath != projectPath
+let settingsPath = dataPath + "/.env"
+
+/// JARVIS_PORT from the settings file, the same place the server reads it.
 func configuredPort() -> Int {
-    guard let env = try? String(contentsOfFile: projectPath + "/.env", encoding: .utf8) else { return 8720 }
+    guard let env = try? String(contentsOfFile: settingsPath, encoding: .utf8) else { return 8720 }
     for line in env.split(separator: "\n") {
         let parts = line.trimmingCharacters(in: .whitespaces).split(separator: "=", maxSplits: 1)
         if parts.count == 2, parts[0] == "JARVIS_PORT", let port = Int(parts[1].trimmingCharacters(in: .whitespaces)) {
@@ -25,6 +44,22 @@ func configuredPort() -> Int {
         }
     }
     return 8720
+}
+
+/// First launch of a standalone build: a settings file and the sample vault,
+/// so there is something to see and somewhere to put a voice key. Anything
+/// already there is left exactly as it is.
+func prepareData() {
+    guard keepsDataApart else { return }
+    let files = FileManager.default
+    try? files.createDirectory(atPath: dataPath, withIntermediateDirectories: true)
+    if !files.fileExists(atPath: settingsPath) {
+        try? files.copyItem(atPath: projectPath + "/jarvis-app/app.env", toPath: settingsPath)
+        try? files.setAttributes([.posixPermissions: 0o600], ofItemAtPath: settingsPath)
+    }
+    if !files.fileExists(atPath: dataPath + "/vault") {
+        try? files.copyItem(atPath: projectPath + "/vault", toPath: dataPath + "/vault")
+    }
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNavigationDelegate {
@@ -40,9 +75,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         buildMenu()
         buildWindow()
         guard FileManager.default.fileExists(atPath: projectPath + "/start.sh") else {
-            say("JARVIS was not found at\n\(projectPath.isEmpty ? "(no folder set)" : projectPath)\n\nRebuild the app from the project with jarvis-app/build.sh.")
+            say("JARVIS was not found at\n\(projectPath)\n\nRebuild the app from the project with jarvis-app/build.sh.")
             return
         }
+        prepareData()
         port = configuredPort()
         if serverIsUp() {
             load()
@@ -54,14 +90,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
-    func applicationWillTerminate(_ note: Notification) {
-        // start.sh execs python, so this is the server itself; the claude
-        // process it keeps warm exits when its stdin closes.
-        guard let server = server, server.isRunning else { return }
-        server.terminate()
-        let deadline = Date().addingTimeInterval(3)
-        while server.isRunning && Date() < deadline { usleep(50_000) }
-    }
+    func applicationWillTerminate(_ note: Notification) { stopServer() }
 
     // MARK: server
 
@@ -89,13 +118,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         process.currentDirectoryURL = URL(fileURLWithPath: projectPath)
         // A deliberately small environment: nothing from a parent shell, and in
         // particular no ANTHROPIC_API_KEY, so Claude stays on the subscription.
-        process.environment = [
+        var env = [
             "HOME": home, "USER": NSUserName(), "LOGNAME": NSUserName(),
             "SHELL": "/bin/zsh", "LANG": "en_US.UTF-8",
             "PATH": "\(home)/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
             "PYTHONUNBUFFERED": "1",
-            "JARVIS_OPEN": "0",       // this window is the browser
+            "PYTHONDONTWRITEBYTECODE": "1",   // never write .pyc files into the app
+            "JARVIS_OPEN": "0",               // this window is the browser
         ]
+        if keepsDataApart {
+            env["JARVIS_HOME"] = dataPath     // settings, vault and memory
+            env["JARVIS_WORKDIR"] = dataPath  // and where Claude itself runs
+        }
+        process.environment = env
         if let log = try? FileHandle(forWritingTo: logURL) {
             process.standardOutput = log
             process.standardError = log
@@ -106,6 +141,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         } catch {
             say("Could not start JARVIS:\n\(error.localizedDescription)")
         }
+    }
+
+    private func stopServer() {
+        // start.sh execs python, so this is the server itself; the claude
+        // process it keeps warm exits when its stdin closes.
+        guard let running = server, running.isRunning else { return }
+        running.terminate()
+        let deadline = Date().addingTimeInterval(3)
+        while running.isRunning && Date() < deadline { usleep(50_000) }
+        server = nil
     }
 
     private func waitForServer(until deadline: Date) {
@@ -121,7 +166,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
             DispatchQueue.main.async {
                 let tail = (try? String(contentsOf: self.logURL, encoding: .utf8))?
                     .split(separator: "\n").suffix(6).joined(separator: "\n") ?? ""
-                self.say("JARVIS did not come up.\n\n\(tail)\n\nFull log: \(self.logURL.path)")
+                self.say("JARVIS did not come up. It needs Python 3 on this Mac\n(xcode-select --install provides it).\n\n\(tail)\n\nFull log: \(self.logURL.path)")
             }
         }
     }
@@ -182,6 +227,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         let appMenu = NSMenu()
         appMenu.addItem(withTitle: "About JARVIS HUD", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
         appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: "Claude Account…", action: #selector(showAccount(_:)), keyEquivalent: "l")
+        appMenu.addItem(withTitle: "Edit Settings…", action: #selector(editSettings(_:)), keyEquivalent: ",")
+        appMenu.addItem(withTitle: "Open Data Folder", action: #selector(openDataFolder(_:)), keyEquivalent: "")
+        let restart = appMenu.addItem(withTitle: "Restart JARVIS", action: #selector(restart(_:)), keyEquivalent: "r")
+        restart.keyEquivalentModifierMask = [.command, .shift]
+        appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Hide JARVIS HUD", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         appMenu.addItem(withTitle: "Quit JARVIS HUD", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appItem.submenu = appMenu
@@ -224,6 +275,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         }
     }
 
+    /// Settings are read when the server starts, so a change needs this.
+    @objc private func restart(_ sender: Any?) {
+        guard server != nil else { reload(sender); return }   // someone else's server: just reconnect
+        web.isHidden = true
+        stopServer()
+        port = configuredPort()
+        startServer()
+        waitForServer(until: Date().addingTimeInterval(45))
+    }
+
+    @objc private func showAccount(_ sender: Any?) {
+        web.evaluateJavaScript("typeof Account !== 'undefined' && Account.open()", completionHandler: nil)
+    }
+
+    @objc private func openDataFolder(_ sender: Any?) {
+        NSWorkspace.shared.open(URL(fileURLWithPath: dataPath))
+    }
+
+    @objc private func editSettings(_ sender: Any?) {
+        let textEdit = URL(fileURLWithPath: "/System/Applications/TextEdit.app")
+        NSWorkspace.shared.open([URL(fileURLWithPath: settingsPath)], withApplicationAt: textEdit,
+                                configuration: NSWorkspace.OpenConfiguration(), completionHandler: nil)
+    }
+
     // MARK: web view
 
     /// Live voice needs the microphone. The page is this Mac's own JARVIS, so
@@ -246,6 +321,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         decisionHandler(.allow)
     }
 
+    /// target="_blank" links (the sign-in page) ask for a new window: send
+    /// them to the browser instead of opening nothing.
+    func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
+                 for action: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+        if let url = action.request.url { NSWorkspace.shared.open(url) }
+        return nil
+    }
+
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
         web.isHidden = true
         say("Could not reach JARVIS on port \(port).\n\(error.localizedDescription)\n\nPress ⌘R to try again.")
@@ -256,12 +339,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
         // in this web view, so the build can be verified without looking at it.
         // JARVIS_HUD_SELFTEST_SAY=<line> also sends that line and records
         // whether its reply was actually played, near-silently.
-        let env = ProcessInfo.processInfo.environment
-        guard let out = env["JARVIS_HUD_SELFTEST"], !out.isEmpty else { return }
+        guard let out = environment["JARVIS_HUD_SELFTEST"], !out.isEmpty else { return }
         var wait = 5.0
-        if let line = env["JARVIS_HUD_SELFTEST_SAY"], !line.isEmpty,
+        if let line = environment["JARVIS_HUD_SELFTEST_SAY"], !line.isEmpty,
            let quoted = try? JSONEncoder().encode(line), let literal = String(data: quoted, encoding: .utf8) {
-            wait = 16.0
+            wait = Double(environment["JARVIS_HUD_SELFTEST_WAIT"] ?? "") ?? 16.0
             let speak = """
             (function () {
               var log = window.__hudAudio = [], t0 = performance.now(), play = HTMLMediaElement.prototype.play;
@@ -272,6 +354,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
                 });
                 return play.apply(el, arguments);
               };
+              if (window.speechSynthesis) {            // the built-in voice, when there is no Fish key
+                var say = speechSynthesis.speak.bind(speechSynthesis);
+                speechSynthesis.speak = function (u) { u.volume = 0; log.push('builtin-voice@' + Math.round(performance.now() - t0)); return say(u); };
+              }
               setTimeout(function () { transmit(\(literal)); }, 2500);
             })()
             """
@@ -283,26 +369,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKUIDelegate, WKNaviga
               audio: window.__hudAudio || null,
               reply: typeof answerText !== 'undefined' ? answerText : null,
               voiceState: document.querySelector('#voiceState').textContent,
+              account: typeof Account !== 'undefined' && Account.info ? { installed: Account.info.installed, signed_in: Account.info.signed_in, plan: Account.info.plan } : null,
+              accountPanelOpen: !document.querySelector('#account').hidden,
+              brainPill: document.querySelector('#pBrain').textContent,
+              voicePill: document.querySelector('#pVoice').textContent,
+              log: Array.prototype.slice.call(document.querySelectorAll('#log .entry'), 0, 6).map(function (e) { return e.textContent.slice(0, 80); }),
               canStream: typeof CAN_STREAM !== 'undefined' ? CAN_STREAM : null,
               mseMp3: !!(window.MediaSource && MediaSource.isTypeSupported('audio/mpeg')),
-              managedMse: !!window.ManagedMediaSource,
               getUserMedia: !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia),
               mediaRecorder: typeof MediaRecorder !== 'undefined',
-              captureStream: !!HTMLMediaElement.prototype.captureStream,
               serverVoice: window.__serverVoice, serverSTT: window.__serverSTT,
               gateway: document.querySelector('#pGateway').textContent,
-              brain: document.querySelector('#pBrain').textContent,
               nodes: window.__jarvisGraph ? window.__jarvisGraph.nodes.length : null,
               scale: window.__jarvisGraph ? Math.round(window.__jarvisGraph.scale * 100) / 100 : null,
               matrix: document.querySelectorAll('#matrix .mcell').length,
               days: document.querySelectorAll('#dayStrip span').length,
-              clock: document.querySelector('#gClock').textContent,
               inner: innerWidth + 'x' + innerHeight })
             """
             webView.evaluateJavaScript(probe) { value, error in
                 let text = (value as? String) ?? "{\"error\": \"\(error?.localizedDescription ?? "no value")\"}"
                 try? text.write(toFile: out, atomically: true, encoding: .utf8)
-                if ProcessInfo.processInfo.environment["JARVIS_HUD_SELFTEST_QUIT"] == "1" {
+                if environment["JARVIS_HUD_SELFTEST_QUIT"] == "1" {
                     NSApp.terminate(nil)
                 }
             }

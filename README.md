@@ -58,14 +58,37 @@ whole server is standard library.
 ## As a Mac app
 
 ```bash
-jarvis-app/build.sh     # builds ~/Applications/JARVIS HUD.app
+jarvis-app/build.sh --dmg          # dist/JARVIS HUD.dmg — open it, drag the app to Applications
+jarvis-app/build.sh [folder]       # the same app straight into a folder (default ~/Applications)
+jarvis-app/build.sh --link         # a small app that runs this project folder in place
 ```
 
 `JARVIS HUD.app` is the HUD in a window of its own. Opening it starts the
 server if it is not already running, and quitting it stops the server again
 (only if the app was the one that started it). It needs the Xcode Command Line
-Tools to build and nothing else; the app remembers where this project folder
-is, so build it again if you move the folder.
+Tools to build. To run, a Mac needs Python 3 and Claude Code.
+
+The app is self-contained: the server, the interface and a freshly generated
+sample vault travel inside it, and everything that changes — `.env`, vault,
+memory, state — lives in `~/Library/Application Support/JARVIS HUD`, created on
+first launch from `jarvis-app/app.env`. Nothing personal is ever packaged; the
+build refuses to if it finds any. **JARVIS HUD ▸ Edit Settings…** opens that
+`.env`, and **Restart JARVIS** applies a change.
+
+**Signing in.** The Brain read-out at the top right (or **JARVIS HUD ▸ Claude
+Account…**) shows whether Claude is connected and has a **Sign in with Claude**
+button. It runs the CLI's own subscription sign-in: your browser opens, you
+approve, the panel notices. It opens by itself when Claude Code is missing or
+signed out.
+
+**What the installed app may do.** Answer, search the web, and use the vault
+and long-term memory — `jarvis-app/app.env` sets `JARVIS_PERMISSION=default`,
+`JARVIS_TOOLS=WebSearch,WebFetch` and `JARVIS_MCP=off`, so Claude is given no
+tool that runs commands or changes files.
+
+The app is signed ad hoc, not notarised: on the Mac that built it, it opens
+normally; a copy sent to another Mac has to be allowed once under System
+Settings ▸ Privacy & Security.
 
 In the app the speaker in the voice dial throbs while JARVIS talks rather than
 following the exact level — that needs a browser feature the system web view
@@ -237,6 +260,9 @@ All optional, all in `.env` — see `.env.example`.
 | `JARVIS_VAULT` | `./vault` | point at any Obsidian vault |
 | `JARVIS_MODEL` | Claude default | `opus`, `sonnet`, … |
 | `JARVIS_PERMISSION` | `bypassPermissions` | full tool access, no prompts — see Security notes |
+| `JARVIS_TOOLS` | all | the complete list of tools Claude is given, e.g. `WebSearch,WebFetch` |
+| `JARVIS_MCP` | `on` | `off` leaves your connected MCP servers out |
+| `JARVIS_HOME` | this folder | where `.env`, `state.json` and the vault live |
 | `JARVIS_WORKDIR` | `~` | what Claude can see |
 | `JARVIS_MEMORY` | `auto` | long-term memory: `auto`, `ask` (only when asked) or `off` |
 | `CLAUDE_CMD` | auto-detected | absolute path if `claude` isn't on PATH |

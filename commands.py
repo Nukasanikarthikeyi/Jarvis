@@ -16,7 +16,7 @@ import uuid
 import memory
 
 ROOT = pathlib.Path(__file__).resolve().parent
-STATE_FILE = pathlib.Path(os.environ.get("JARVIS_STATE", ROOT / "state.json"))
+STATE_FILE = pathlib.Path(os.environ.get("JARVIS_STATE") or memory.DATA / "state.json")
 _LOCK = threading.Lock()
 _DEFAULT = {"profile": [], "goal": "", "personality": "", "tasks": [], "demo_pending": ""}
 DEMO = os.environ.get("JARVIS_DEMO", "1").strip().lower() not in {"0", "false", "no", "off"}

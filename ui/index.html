@@ -49,10 +49,27 @@
 
   <div class="pills">
     <div class="pill"><i class="dot ok"></i><span>Gateway</span><b id="pGateway">booting</b></div>
-    <div class="pill"><i class="dot ok"></i><span>Brain</span><b id="pBrain">Claude CLI</b></div>
+    <div class="pill link" id="pillBrain" role="button" tabindex="0" title="Claude account — click to see or change the sign-in"><i class="dot ok" id="brainDot"></i><span>Brain</span><b id="pBrain">Claude CLI</b></div>
     <div class="pill"><i class="dot warn"></i><span>Voice</span><b id="pVoice">browser</b></div>
   </div>
 </header>
+
+<!-- Claude account: whether the CLI is signed in, and the sign-in itself -->
+<section class="account" id="account" hidden>
+  <h2><span>Claude account</span>
+    <button id="btnAccountClose" class="convoclose" title="Close" aria-label="Close">✕</button></h2>
+  <p class="acctstate" id="accountState">Checking…</p>
+  <div class="acctrow" id="accountActions">
+    <button id="btnSignIn" class="send">Sign in with Claude</button>
+    <a id="accountLink" class="acctlink" target="_blank" rel="noopener" hidden>Open the sign-in page</a>
+  </div>
+  <div class="acctrow" id="accountCode" hidden>
+    <input id="accountCodeInput" autocomplete="off" placeholder="code from the browser, if it shows one">
+    <button id="btnAccountCode" class="mic">Submit</button>
+    <button id="btnAccountCancel" class="mic">Cancel</button>
+  </div>
+  <p class="hint" id="accountHint"></p>
+</section>
 
 <main class="grid">
 

@@ -22,7 +22,10 @@ from urllib.parse import urlparse, parse_qs
 ROOT = pathlib.Path(__file__).resolve().parent
 UI = ROOT / "ui"
 
-_env = ROOT / ".env"
+# Settings and data sit next to the code unless JARVIS_HOME says otherwise.
+# The Mac app sets it, so nothing is ever written inside its own bundle.
+HOME = pathlib.Path(os.path.expanduser(os.environ.get("JARVIS_HOME") or ROOT))
+_env = HOME / ".env"
 if _env.exists():
     for line in _env.read_text(encoding="utf-8").splitlines():
         line = line.strip()
@@ -118,7 +121,14 @@ class Handler(BaseHTTPRequestHandler):
                 links=len(g["links"]), voice=voice.describe(),
                 listener=voice.describe_stt(), stt=voice.stt_kind(),
                 server_stt=voice.stt_kind() in ("whisper", "fish"),
-                server_voice=voice.available(), session=SESSION["id"]))
+                server_voice=voice.available(), session=SESSION["id"],
+                demo=commands.DEMO))
+
+        if p == "/api/claude":
+            # ?login=1 is the cheap poll while a sign-in is under way.
+            only_login = parse_qs(urlparse(self.path).query).get("login", ["0"])[0] == "1"
+            body = {} if only_login else runtime.account()
+            return self._json(dict(body, login=runtime.login_state()))
 
         if p == "/api/graph":
             force = parse_qs(urlparse(self.path).query).get("force", ["0"])[0] == "1"
@@ -148,7 +158,8 @@ class Handler(BaseHTTPRequestHandler):
         if not self._token_ok():
             return self._json({"error": "unauthorized"}, 401)
         ctype = self.headers.get("Content-Type", "").split(";", 1)[0].lower()
-        if p in {"/api/run", "/api/speak", "/api/new", "/api/cancel"} and ctype != "application/json":
+        if p in {"/api/run", "/api/speak", "/api/new", "/api/cancel", "/api/claude/login",
+                 "/api/claude/code", "/api/claude/cancel"} and ctype != "application/json":
             return self._json({"error": "application/json required"}, 415)
         try:
             raw = self._read(MAX_AUDIO if p == "/api/listen" else MAX_JSON)
@@ -169,6 +180,23 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"text": voice.transcribe(raw, self.headers.get("Content-Type", "audio/webm"))})
             except Exception as e:  # noqa: BLE001
                 return self._json({"error": str(e)[:400], "text": ""}, 503)
+
+        if p == "/api/claude/login":
+            try:
+                started = runtime.login_start()
+            except Exception as e:  # noqa: BLE001 — most likely the CLI is not installed
+                return self._json({"error": str(e)[:200]}, 503)
+            return self._json(dict(started=started, login=runtime.login_state()))
+
+        if p == "/api/claude/code":
+            try:
+                code = str(json.loads(raw or b"{}").get("code") or "")
+            except json.JSONDecodeError:
+                return self._json({"error": "bad json"}, 400)
+            return self._json(dict(sent=bool(code.strip()) and runtime.login_code(code)))
+
+        if p == "/api/claude/cancel":
+            return self._json(dict(stopped=runtime.login_cancel()))
 
         if p == "/api/new":
             runtime.cancel_active()
