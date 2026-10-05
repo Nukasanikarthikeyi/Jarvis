@@ -39,7 +39,8 @@
       spring: 0.035,       // link pull toward its rest length
       rest: 78,            // rest length before radii
       centre: 0.0026,      // drift toward the middle
-      damping: 0.82
+      damping: 0.82,
+      maxStep: 40          // furthest a node may move in one tick (see _tick)
     };
     this.alpha = 1;                   // simulation temperature
     this.drag = null; this.panning = null; this.hover = null;
@@ -56,9 +57,18 @@
     requestAnimationFrame(this._loop);
   }
 
+  /* The size to seed a layout in. A canvas that is not laid out yet (a tab
+     opened in the background, a window still resizing) can be a few pixels
+     across; seeding 133 nodes on one spot makes the repulsion throw them
+     thousands of pixels apart, and the cloud never comes back. */
+  MemoryGraph.prototype._seedBox = function () {
+    var W = this.cv.clientWidth, H = this.cv.clientHeight;
+    return (W < 50 || H < 50) ? { W: 900, H: 600 } : { W: W, H: H };
+  };
+
   MemoryGraph.prototype.setData = function (data) {
     var prev = new Map(this.nodes.map(function (n) { return [n.id, n]; }));
-    var W = this.cv.clientWidth || 900, H = this.cv.clientHeight || 600;
+    var box = this._seedBox(), W = box.W, H = box.H;
     var spread = Math.min(W, H) * 0.42 || 260;
     this.nodes = data.nodes.map(function (n, i) {
       var old = prev.get(n.id);
@@ -100,7 +110,7 @@
   };
 
   MemoryGraph.prototype.relayout = function (steps) {
-    var W = this.cv.clientWidth || 900, H = this.cv.clientHeight || 600;
+    var box = this._seedBox(), W = box.W, H = box.H;
     var spread = Math.min(W, H) * 0.42 || 260, n = this.nodes.length;
     this.nodes.forEach(function (nd, i) {
       var ang = i * 2.39996, rad = spread * Math.sqrt((i + 1) / n);
@@ -215,6 +225,14 @@
       node.vx += Math.cos(this.t * 0.009 * node.wob + node.phase) * amp;
       node.vy += Math.sin(this.t * 0.011 * node.wob + node.phase * 1.6) * amp;
       node.vx *= this.p.damping; node.vy *= this.p.damping;
+      // Repulsion goes as 1/d², so two nodes that drift almost on top of each
+      // other get a near-infinite shove. Uncapped, that throws part of the
+      // cloud thousands of pixels out and it takes minutes to drift back —
+      // and whether it happens depends on nothing but the canvas size.
+      var speed = Math.sqrt(node.vx * node.vx + node.vy * node.vy);
+      if (speed > this.p.maxStep) {
+        node.vx *= this.p.maxStep / speed; node.vy *= this.p.maxStep / speed;
+      }
       node.x += node.vx; node.y += node.vy;
     }
     this.alpha = Math.max(this.p.alphaFloor, this.alpha * 0.994);

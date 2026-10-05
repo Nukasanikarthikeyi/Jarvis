@@ -64,17 +64,37 @@ function bubble(who, text) {
   var b = document.createElement('div');
   b.className = 'bubble ' + who;
   if (who === 'jarvis') renderSpoken(b, text); else b.textContent = text;
-  document.body.classList.add('hasconvo');
   $('#transcript').appendChild(b);
   var turns = $('#transcript').querySelectorAll('.bubble.me').length;
   $('#convoCount').textContent = turns + (turns === 1 ? ' turn' : ' turns');
+  $('#convoBadge').textContent = turns;
+  $('#btnConvo').classList.toggle('has', turns > 0);
   $('#transcript').scrollTop = $('#transcript').scrollHeight;
   return b;
+}
+
+/* The conversation panel is optional. Its icon in the ask bar opens it; the
+   icon or the panel's own ✕ closes it. Turns keep collecting while it is shut,
+   and the badge on the icon counts them. */
+function setConvo(open) {
+  document.body.classList.toggle('convo-open', open);
+  var btn = $('#btnConvo'), label = open ? 'Hide conversation' : 'Show conversation';
+  btn.classList.toggle('on', open);
+  btn.title = label;
+  btn.setAttribute('aria-label', label);
+  btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  if (open) $('#transcript').scrollTop = $('#transcript').scrollHeight;
 }
 
 function setVoiceState(state, cls) {
   $('#voiceState').textContent = state;
   $('#voiceDot').className = 'dot ' + (cls || '');
+  document.body.classList.toggle('speaking', state === 'SPEAKING');   // the HUD's speaker moves on this
+}
+
+/* Hands each <audio> to the HUD so its speaker can follow the real level. */
+function announceAudio(audio) {
+  window.dispatchEvent(new CustomEvent('jarvis:audio', { detail: audio }));
 }
 
 /* ── panels ───────────────────────────────── */
@@ -151,6 +171,7 @@ var MATRIX = [
   ['/recall', 'search vault'], ['/graph', 'reload memory'],
   ['/goal', 'objective'], ['/mission', 'queue'],
   ['/profile', 'remember'], ['/status', 'runtime'],
+  ['/remember', 'save a memory'], ['/memory', 'what I know'],
   ['/new', 'fresh session'], ['/help', 'commands']
 ];
 function renderMatrix() {
@@ -160,7 +181,7 @@ function renderMatrix() {
   Array.prototype.forEach.call($('#matrix').children, function (cell) {
     cell.onclick = function () {
       var cmd = cell.dataset.cmd;
-      if (['/recall', '/goal', '/mission', '/profile'].indexOf(cmd) >= 0) {
+      if (['/recall', '/goal', '/mission', '/profile', '/remember'].indexOf(cmd) >= 0) {
         $('#ask').value = cmd + ' ';
         $('#ask').focus();
       } else { transmit(cmd); }
@@ -202,6 +223,9 @@ async function transmit(message, opts) {
   opts = opts || {};
   running = true;
   answerText = '';
+  if (speech) speech.stop();                 // a new question cuts the old answer off
+  var mine = speech = opts.speak === false ? null : new Spoken();
+  Live.speaking = !!mine;                    // held until the last word has been heard
   document.body.classList.remove('boot');
   document.body.classList.add('running');
   if (graph) graph.setActivity(1);
@@ -244,8 +268,12 @@ async function transmit(message, opts) {
   if (graph) graph.setActivity(0);
   answerBubble.classList.remove('thinking');
   $('#sLatency').textContent = Math.round(performance.now() - t0) + 'ms';
-  setVoiceState('IDLE', '');
-  if (answerText.trim() && opts.speak !== false) await speak(answerText.trim());
+  if (mine) await mine.close();
+  if (speech === mine) {
+    speech = null;
+    Live.speaking = false;
+    setVoiceState(Live.on ? 'LISTENING' : 'IDLE', Live.on ? 'hot' : '');
+  }
 }
 
 function handleEvent(ev) {
@@ -270,8 +298,24 @@ function handleEvent(ev) {
     case 'graph':
       loadGraph(true);
       break;
+    case 'memory':
+      /* Long-term memory changed. A saved memory is a new note, so the graph
+         is reloaded and the view goes to it: you see what was just kept. */
+      if (ev.action === 'saved') log('mem', 'MEMORY', 'remembered · ' + ev.title);
+      else if (ev.action === 'forgotten') log('mem', 'MEMORY', 'forgotten · ' + ev.title);
+      else if (ev.action === 'known') log('mem', 'MEMORY', 'already held · ' + ev.title);
+      else log('note', 'MEMORY', 'no memory matched “' + (ev.title || '') + '”');
+      if (ev.action === 'saved' || ev.action === 'forgotten') {
+        var wasFocused = graph.focus === ev.id;
+        loadGraph(true).then(function () {
+          if (ev.action === 'saved') graph.setFocus(ev.id, false);
+          else if (wasFocused) graph.setFocus(null);     // its note is gone
+        });
+      }
+      break;
     case 'delta':
       answerText += ev.text;
+      if (speech) speech.feed(ev.text);
       renderSpoken(answerBubble, answerText);
       var tone = lastTone(answerText);
       if (tone) $('#toneNow').textContent = tone;
@@ -297,7 +341,20 @@ function handleEvent(ev) {
   }
 }
 
-/* ── voice ────────────────────────────────── */
+/* ── voice ──────────────────────────────────
+   Speech starts while Claude is still writing. Finished sentences go to
+   /api/speak one piece at a time and the mp3 is played as it streams in, so the
+   first words are heard about a second after they are written. Waiting for the
+   whole reply and then for the whole clip cost ~25s of silence on a long answer. */
+var FIRST_CUT = 50;    // chars before the first piece may be cut: low, so speech starts early
+var NEXT_CUT = 160;    // later pieces are grouped into whole thoughts so Fish can phrase them
+var PREROLL = 1.0;     // seconds of audio banked before playback starts (see Spoken.start)
+var CAN_STREAM = !!(window.MediaSource && MediaSource.isTypeSupported('audio/mpeg'));
+/* Tags that are a noise rather than a register. A register carries into the
+   next piece; a sigh must not be repeated at the top of every sentence. */
+var SOUND_TAG = /laugh|sigh|gasp|yawn|chuckl|cough|breath|break|pause|throat|sniff|groan|applau|audience/i;
+var speech = null;     // the reply being spoken right now, if any
+
 function playBlob(blob) {
   return new Promise(function (resolve) {
     var url = URL.createObjectURL(blob);
@@ -305,39 +362,232 @@ function playBlob(blob) {
     var done = function () { URL.revokeObjectURL(url); resolve(); };
     audio.onended = done;
     audio.onerror = done;
+    announceAudio(audio);
     audio.play().catch(done);
   });
 }
 
-/* Resolves when playback actually FINISHES, not when it starts — live mode
-   needs that to know when it is safe to listen again. */
-async function speak(text) {
-  setVoiceState('SPEAKING', 'hot');
-  Live.speaking = true;
-  try {
-    if (window.__serverVoice) {
-      try {
-        var res = await fetch('/api/speak', {
-          method: 'POST', headers: headers({ 'content-type': 'application/json' }),
-          body: JSON.stringify({ text: text })
-        });
-        if (res.ok) { await playBlob(await res.blob()); return; }
-        log('note', 'VOICE', 'server voice failed, using browser');
-      } catch (e) { log('note', 'VOICE', 'server voice unreachable, using browser'); }
-    }
-    if (!window.speechSynthesis) return;
-    await new Promise(function (resolve) {
-      var u = new SpeechSynthesisUtterance(stripTones(text));
-      u.rate = 1.02; u.pitch = 0.92;
-      u.onend = resolve; u.onerror = resolve;
-      speechSynthesis.cancel();
-      speechSynthesis.speak(u);
-    });
-  } finally {
-    Live.speaking = false;
-    setVoiceState(Live.on ? 'LISTENING' : 'IDLE', Live.on ? 'hot' : '');
-  }
+function browserSay(text) {
+  return new Promise(function (resolve) {
+    text = stripTones(text);
+    if (!window.speechSynthesis || !text) return resolve();
+    var u = new SpeechSynthesisUtterance(text);
+    u.rate = 1.02; u.pitch = 0.92;
+    u.onend = resolve; u.onerror = resolve;
+    speechSynthesis.cancel();
+    speechSynthesis.speak(u);
+  });
 }
+
+/* The whole reply as one clip: the path for a browser that cannot play an mp3
+   stream, and for no server voice at all. */
+async function speakWhole(text) {
+  if (!text) return;
+  setVoiceState('SPEAKING', 'hot');
+  if (window.__serverVoice) {
+    try {
+      var res = await fetch('/api/speak', {
+        method: 'POST', headers: headers({ 'content-type': 'application/json' }),
+        body: JSON.stringify({ text: text })
+      });
+      if (res.ok) { await playBlob(await res.blob()); return; }
+      log('note', 'VOICE', 'server voice failed, using browser');
+    } catch (e) { log('note', 'VOICE', 'server voice unreachable, using browser'); }
+  }
+  await browserSay(text);
+}
+
+/* Where the next piece may end: a sentence end at or after `min` chars. Tags
+   are masked first so punctuation inside one is never taken for a sentence
+   end, and a tag still being written at the tail waits for its "]". */
+function cutPoint(text, min) {
+  var masked = text.replace(TONE_RE, function (m) { return new Array(m.length + 1).join('x'); });
+  var open = masked.lastIndexOf('[');
+  var limit = (open >= 0 && masked.length - open <= 91) ? open : masked.length;
+  var re = /[.!?…]+["')”’]*\s+|\n+/g, m;
+  while ((m = re.exec(masked)) !== null) {
+    var end = m.index + m[0].length;
+    if (end > limit) break;
+    if (end >= min) return end;
+  }
+  return 0;
+}
+
+function appendAudio(sb, bytes) {
+  return new Promise(function (resolve, reject) {
+    var off = function () {
+      sb.removeEventListener('updateend', ok);
+      sb.removeEventListener('error', bad);
+    };
+    var ok = function () { off(); resolve(); };
+    var bad = function () { off(); reject(new Error('audio append failed')); };
+    sb.addEventListener('updateend', ok);
+    sb.addEventListener('error', bad);
+    try { sb.appendBuffer(bytes); } catch (e) { off(); reject(e); }
+  });
+}
+
+/* One spoken reply. feed() it text as it streams, close() it when the text is
+   complete. `done` resolves when the audio has actually FINISHED, not when it
+   starts — live mode needs that to know when it is safe to listen again. */
+function Spoken() {
+  var s = this;
+  s.stream = !!window.__serverVoice && CAN_STREAM;
+  s.buf = '';          // written, not yet cut into a piece
+  s.queue = [];        // pieces waiting for Fish
+  s.rest = '';         // what the browser voice must finish if Fish fails midway
+  s.pieces = 0;
+  s.tone = null;       // last register tag, carried into pieces that open without one
+  s.closed = false;    // no more text is coming
+  s.busy = false;      // a piece is streaming
+  s.failed = false;
+  s.dead = false;      // stopped by Escape or by a newer question
+  s.fed = false;       // some audio reached the player
+  s.started = false;   // playback has begun
+  s.audio = s.ms = s.sb = s.ctl = s.url = null;
+  s.done = new Promise(function (resolve) { s.resolve = resolve; });
+}
+
+Spoken.prototype.feed = function (text) {
+  this.buf += text;
+  if (this.stream && !this.failed) this.cut(false);
+};
+
+Spoken.prototype.cut = function (flush) {
+  for (;;) {
+    var at = flush ? this.buf.length : cutPoint(this.buf, this.pieces ? NEXT_CUT : FIRST_CUT);
+    if (at <= 0) return;
+    var piece = this.buf.slice(0, at).trim();
+    this.buf = this.buf.slice(at);
+    if (/[\p{L}\p{N}]/u.test(stripTones(piece))) this.say(piece);
+    if (flush) return;
+  }
+};
+
+/* A piece that opens without its own tag inherits the register of the one
+   before it, as it would have if the reply had been sent as a single clip. */
+Spoken.prototype.say = function (piece) {
+  var text = (!/^\[/.test(piece) && this.tone) ? '[' + this.tone + '] ' + piece : piece;
+  var m;
+  TONE_RE.lastIndex = 0;
+  while ((m = TONE_RE.exec(piece)) !== null) if (!SOUND_TAG.test(m[1])) this.tone = m[1];
+  this.pieces++;
+  this.queue.push(text);
+  this.pump();
+};
+
+/* One piece at a time, in order. Fish renders about twice as fast as the audio
+   plays, so the next piece is buffered well before the current one runs out. */
+Spoken.prototype.pump = async function () {
+  if (this.busy) return;
+  this.busy = true;
+  while (!this.dead && !this.failed && this.queue.length) {
+    var text = this.queue.shift();
+    try { await this.pipe(text); }
+    catch (e) {
+      if (this.dead) break;
+      this.failed = true;
+      this.queue.unshift(text);
+      log('note', 'VOICE', 'server voice failed, using browser');
+    }
+  }
+  this.busy = false;
+  this.end();
+};
+
+Spoken.prototype.pipe = async function (text) {
+  this.ctl = new AbortController();
+  var res = await fetch('/api/speak', {
+    method: 'POST', headers: headers({ 'content-type': 'application/json' }),
+    body: JSON.stringify({ text: text }), signal: this.ctl.signal
+  });
+  if (!res.ok) throw new Error('speak HTTP ' + res.status);
+  if (!this.audio) await this.open();
+  var reader = res.body.getReader();
+  for (;;) {
+    var chunk = await reader.read();
+    if (chunk.done) { if (this.fed) this.start(); return; }
+    if (this.dead) { reader.cancel(); return; }
+    await appendAudio(this.sb, chunk.value);
+    this.fed = true;
+    if (this.sb.buffered.length && this.sb.buffered.end(0) >= PREROLL) this.start();
+  }
+};
+
+/* Fish sends audio in bursts, so playing from the very first frames runs the
+   buffer dry about a second in and the voice stutters. Hold back until a
+   second is banked, or the piece is complete if it is shorter than that. */
+Spoken.prototype.start = function () {
+  var s = this;
+  if (s.started || s.dead) return;
+  s.started = true;
+  s.audio.play().catch(function () { s.finish(); });   // autoplay refused: nothing will sound
+};
+
+Spoken.prototype.open = function () {
+  var s = this, ms = new MediaSource(), audio = new Audio();
+  s.ms = ms; s.audio = audio;
+  s.url = URL.createObjectURL(ms);
+  audio.src = s.url;
+  audio.onplaying = function () { if (!s.dead) setVoiceState('SPEAKING', 'hot'); };
+  audio.onended = audio.onerror = function () { s.finish(); };
+  announceAudio(audio);
+  return new Promise(function (resolve, reject) {
+    ms.addEventListener('sourceopen', function () {
+      try { s.sb = ms.addSourceBuffer('audio/mpeg'); } catch (e) { return reject(e); }
+      resolve();
+    }, { once: true });
+  });
+};
+
+/* Runs whenever the pump goes idle. Once no more text is coming, tell the
+   player the clip is complete so `ended` can fire when playback gets there. */
+Spoken.prototype.end = function () {
+  if (!this.closed || this.busy || this.dead) return;
+  if (this.failed) {
+    this.rest = this.queue.join(' ') + ' ' + this.buf;
+    this.queue = []; this.buf = '';
+  }
+  if (!this.fed) return this.finish();
+  try { if (this.ms.readyState === 'open') this.ms.endOfStream(); }
+  catch (e) { this.finish(); }
+};
+
+Spoken.prototype.finish = function () {
+  var s = this, rest = s.rest;
+  s.rest = '';
+  if (rest && !s.dead) return browserSay(rest).then(function () { s.settle(); });
+  s.settle();
+};
+
+Spoken.prototype.settle = function () {
+  if (this.url) { URL.revokeObjectURL(this.url); this.url = null; }
+  this.resolve();
+};
+
+Spoken.prototype.close = function () {
+  var s = this;
+  s.closed = true;
+  if (s.dead) return s.done;
+  if (!s.stream) {
+    var text = s.buf.trim();
+    s.buf = '';
+    speakWhole(text).then(function () { s.settle(); });
+    return s.done;
+  }
+  s.cut(true);
+  s.end();
+  return s.done;
+};
+
+Spoken.prototype.stop = function () {
+  this.dead = true;
+  this.queue = []; this.rest = '';
+  if (this.ctl) this.ctl.abort();
+  if (this.audio) this.audio.pause();
+  if (window.speechSynthesis) speechSynthesis.cancel();
+  this.settle();
+};
 
 /* ── live voice ───────────────────────────────
    Hold the mic open, watch the input level, and cut an utterance when you stop
@@ -563,6 +813,8 @@ window.addEventListener('DOMContentLoaded', function () {
   $('#ask').addEventListener('keydown', function (e) {
     if (e.key === 'Enter') { var v = $('#ask').value; $('#ask').value = ''; transmit(v); }
   });
+  $('#btnConvo').onclick = function () { setConvo(!document.body.classList.contains('convo-open')); };
+  $('#btnConvoClose').onclick = function () { setConvo(false); };
   $('#btnFit').onclick = function () { graph.fit(); };
   $('#btnLabels').onclick = function () {
     graph.showLabels = !graph.showLabels;
@@ -577,6 +829,7 @@ window.addEventListener('DOMContentLoaded', function () {
   document.addEventListener('keydown', function (e) {
     if (e.key === 'Escape') {
       if (activeCtl) activeCtl.abort();
+      if (speech) speech.stop();
       fetch('/api/cancel', { method: 'POST', headers: headers({ 'content-type': 'application/json' }), body: '{}' });
       graph.setFocus(null);
     }

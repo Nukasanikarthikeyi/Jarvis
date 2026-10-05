@@ -6,11 +6,16 @@ billing. The memory is a folder of markdown you can open in Obsidian.
 
 Nothing is hosted. The server binds to `127.0.0.1` only.
 
+Based on [Itsme23476/jarvis-claude-code](https://github.com/Itsme23476/jarvis-claude-code),
+whose history is kept in this repository. This copy adds streamed speech, a
+long-lived Claude process, the holographic HUD skin with a speaker that moves
+with the voice, an optional conversation panel, and long-term memory.
+
 ## Quick start with Claude Code
 
 Paste this into a fresh Claude Code session:
 
-> Clone https://github.com/Itsme23476/jarvis-claude-code and set it up for me.
+> Clone https://github.com/Nukasanikarthikeyi/Jarvis and set it up for me.
 > Read SETUP-PROMPT.md in the repo first and follow it — it has the rules that
 > matter. Short version: it runs on my Claude subscription so never use `--bare`
 > and never set ANTHROPIC_API_KEY; ask me for my Fish Audio key and put it in
@@ -40,7 +45,7 @@ specific file.
 ## Run it
 
 ```bash
-cd jarvis-claude
+cd Jarvis
 python3 seed_vault.py     # writes a sample agency vault (skip if you have one)
 ./start.sh
 ```
@@ -77,6 +82,9 @@ graph reloads from disk automatically when files change, or on `/graph`.
 | command | does |
 |---|---|
 | `/recall <query>` | search the vault |
+| `/remember <fact>` | keep it in long-term memory |
+| `/memory` | hear what is in long-term memory (`/memory <query>` searches the vault) |
+| `/forget <memory>` | drop one memory |
 | `/graph` | reload memory from disk |
 | `/goal`, `/profile`, `/personality` | standing context injected into every turn |
 | `/mission [task]` | mission queue |
@@ -85,6 +93,34 @@ graph reloads from disk automatically when files change, or on `/graph`.
 
 Anything else goes to Claude Code with the relevant vault notes attached.
 `Esc` cancels a running turn. `/` focuses the input.
+
+## Long-term memory
+
+JARVIS remembers what you tell it, across restarts. Say "remember that my
+sister's birthday is the third of March" and it is kept; mention in passing
+that you take your coffee black and it keeps that too. Ask about either next
+week, in a new conversation, and it knows. "Forget what I told you about my
+coffee" drops it.
+
+Each memory is one more note, in `vault/memory/`, so it is plain markdown you
+can read, edit or delete, and it shows up in the graph as a cyan node. A memory
+that mentions something already in the vault is linked to it — remember
+something about Tom Rivers and the note hangs off Tom Rivers.
+
+- **Saving costs no time.** Claude ends its reply with a hidden
+  `<remember>…</remember>` tag; the server strips it before the reply is shown
+  or spoken and writes the note. No tool call, so no pause.
+- **Recall.** The full list is given to Claude when a conversation starts and
+  again whenever it changes, and memories are also found by the same keyword
+  recall as the rest of the vault.
+- **Forgetting moves, it does not delete.** The note goes to `vault/.trash/`
+  (where Obsidian puts deleted notes too) and can be dragged back.
+- **`JARVIS_MEMORY`** sets how eager it is: `auto` (the default) saves when
+  asked and when you share something lasting; `ask` saves only when asked;
+  `off` turns long-term memory off.
+
+`/profile` is still there and unchanged; it is a short list kept in
+`state.json` and sent with every turn.
 
 ## Voice
 
@@ -111,6 +147,12 @@ endpoint if you later want token-by-token speech.
 
 Swapping voices means editing `.env` and restarting — the value is read at
 startup.
+
+Speech is streamed. Each finished sentence is sent to Fish while Claude is still
+writing the next one, and the audio plays as it arrives, so JARVIS starts talking
+about two seconds after you ask instead of after the whole reply has been
+rendered. This relies on `FISH_AUDIO_LATENCY=balanced` (the default); `normal`
+makes Fish hold every clip until it is complete. `Esc` stops it mid-sentence.
 
 ## Live voice
 
@@ -164,6 +206,7 @@ All optional, all in `.env` — see `.env.example`.
 | `JARVIS_MODEL` | Claude default | `opus`, `sonnet`, … |
 | `JARVIS_PERMISSION` | `bypassPermissions` | full tool access, no prompts — see Security notes |
 | `JARVIS_WORKDIR` | `~` | what Claude can see |
+| `JARVIS_MEMORY` | `auto` | long-term memory: `auto`, `ask` (only when asked) or `off` |
 | `CLAUDE_CMD` | auto-detected | absolute path if `claude` isn't on PATH |
 
 ## Security notes
@@ -190,11 +233,12 @@ All optional, all in `.env` — see `.env.example`.
 
 ```
 server.py      HTTP + NDJSON streaming, token auth
-runtime.py     drives `claude -p --output-format stream-json`
-memory.py      vault -> graph, recall, per-turn context
+runtime.py     keeps one `claude -p` alive, stream-json in and out
+memory.py      vault -> graph, recall, per-turn context, long-term memory
 commands.py    slash commands + demo fixtures
 voice.py       Fish Audio TTS/STT (optional)
 seed_vault.py  writes the sample vault
 ui/            index.html · styles.css · app.js · graph.js
+               hud.js (day strip, ring gauges, the speaker that moves with the voice) · circuit.svg
 vault/         your markdown memory
 ```

@@ -8,7 +8,7 @@ for one API key, and hands you a running JARVIS.
 
 I want you to set up my own JARVIS assistant. Clone and run this repo:
 
-https://github.com/Itsme23476/jarvis-claude-code
+https://github.com/Nukasanikarthikeyi/Jarvis
 
 ## What this is
 
@@ -16,13 +16,20 @@ A local voice-and-graph HUD driven by Claude Code. A small Python server (standa
 library only, no pip installs) shells out to the `claude` CLI in headless mode and
 streams the result to a browser front end. There are three parts:
 
-- **Brain** — `runtime.py` runs `claude -p --output-format stream-json --include-partial-messages --verbose`
-  and maps the event stream to HUD events. Because it invokes the CLI directly, it
-  authenticates with my **Claude subscription** — no API key, no per-token billing.
+- **Brain** — `runtime.py` keeps one `claude -p --input-format stream-json --output-format stream-json --include-partial-messages --verbose`
+  process alive, started before the first question, and maps its event stream to
+  HUD events. Relaunching the CLI per turn costs 3–6 seconds, so do not go back to
+  that. Because it invokes the CLI directly, it authenticates with my **Claude
+  subscription** — no API key, no per-token billing.
 - **Memory** — `memory.py` reads `vault/*.md` (Obsidian-style markdown with YAML
   frontmatter and `[[wikilinks]]`) and turns it into a force-directed knowledge
   graph. On every question it injects the most relevant notes into Claude's system
   prompt and focuses the graph on the note it used.
+  It also holds JARVIS's long-term memory: what I tell it to remember becomes a
+  note in `vault/memory/`. Claude saves by ending a reply with a hidden
+  `<remember>…</remember>` tag, which `memory.TagFilter` strips before the reply
+  is shown or spoken — keep it that way, a tool call there would add seconds of
+  silence. `<forget>…</forget>` moves a memory to `vault/.trash/`.
 - **Voice** — `voice.py` speaks through Fish Audio. The key stays server-side; the
   browser only ever receives mp3 bytes from `/api/speak`.
 
@@ -141,8 +148,14 @@ things in `ui/app.js` must not be broken if you touch it:
 - Detection is suspended while `running` is true and while `Live.speaking` is
   true. Remove either guard and JARVIS transcribes its own reply as the next
   question and loops forever.
-- `speak()` resolves on the audio's `ended` event, not on `play()`. If you make
-  it resolve early, listening resumes over the tail of its own voice.
+- `Spoken.close()` resolves on the audio's `ended` event, not on `play()`, and
+  `Live.speaking` stays true until it does. If you make it resolve early,
+  listening resumes over the tail of its own voice.
+
+Speech is streamed: each finished sentence goes to `/api/speak` while Claude is
+still writing, and the mp3 is played as it arrives. That needs
+`FISH_AUDIO_LATENCY=balanced` (the default) — in `normal` mode Fish sends nothing
+until the whole clip is rendered.
 
 Local whisper hallucinates on silence ("you", "thank you"), so `voice.py`
 filters those. Leave `yes`/`ok`/`sure` unfiltered — they are real answers.

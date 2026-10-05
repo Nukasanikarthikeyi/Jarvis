@@ -40,7 +40,7 @@ API_TOKEN = secrets.token_urlsafe(32)
 RUN_LOCK = threading.Lock()
 MAX_JSON = 1024 * 1024
 MAX_AUDIO = 12 * 1024 * 1024
-SESSION = {"id": None}
+SESSION = {"id": None, "mem": None}   # mem: the memories Claude was last shown
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -66,6 +66,27 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(data)
+
+    def _relay(self, first, rest, ctype):
+        """Pass bytes through as they arrive, so the browser can start playing
+        speech while Fish is still synthesising the rest of the clip."""
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        try:
+            self.wfile.write(first)
+            self.wfile.flush()
+            for chunk in rest:
+                self.wfile.write(chunk)
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        except Exception:  # noqa: BLE001 — upstream died mid-clip; headers are already out
+            pass
+        finally:
+            rest.close()
 
     def _read(self, limit):
         n = int(self.headers.get("Content-Length", 0))
@@ -137,9 +158,11 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/speak":
             try:
                 text = (json.loads(raw or b"{}").get("text") or "").strip()
-                return self._bytes(voice.speak(text), "audio/mpeg")
+                audio = voice.speak_stream(text)
+                first = next(audio, b"")
             except Exception as e:  # noqa: BLE001
                 return self._json({"error": str(e)[:200]}, 503)
+            return self._relay(first, audio, "audio/mpeg")
 
         if p == "/api/listen":
             try:
@@ -153,8 +176,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": True})
 
         if p == "/api/cancel":
+            # Escape also just silences speech. Only a turn that was actually
+            # killed leaves the conversation in a state worth abandoning.
             stopped = runtime.cancel_active()
-            SESSION["id"] = None
+            if stopped:
+                SESSION["id"] = None
             return self._json({"ok": True, "stopped": stopped})
 
         if p == "/api/run":
@@ -188,7 +214,8 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write((json.dumps(ev) + "\n").encode())
             self.wfile.flush()
 
-        cmd = commands.handle(message, runner=lambda m: runtime.run(m, None, commands.context_block(m)))
+        cmd = commands.handle(message, runner=lambda m: runtime.run(
+            m, None, commands.system_prompt(), commands.context_block(m)))
         if cmd:
             if cmd.get("note"):
                 emit(dict(t="note", message=cmd["note"]))
@@ -198,6 +225,8 @@ class Handler(BaseHTTPRequestHandler):
                 emit(dict(t="focus", id=str(cmd["focus"]).lower()))
             if cmd.get("graph"):
                 emit(dict(t="graph"))
+            if cmd.get("memory"):
+                emit(dict(t="memory", **cmd["memory"]))
             if cmd.get("message") is None:
                 delay = float(cmd.get("delay") or 0)
                 for event in cmd.get("events", []):
@@ -210,15 +239,37 @@ class Handler(BaseHTTPRequestHandler):
                 return
             message = cmd["message"]
 
-        system = commands.context_block(message) or None
         hit = memory.top_match(message)
         if hit:
             emit(dict(t="focus", id=hit))
+        # Claude is shown the long-term memories when a conversation starts and
+        # again only if they have changed since.
+        held = memory.memories_signature()
+        context = commands.context_block(
+            message, with_memories=SESSION["id"] is None or SESSION["mem"] != held)
+        tags = memory.TagFilter()      # <remember>/<forget> never reach the screen or speaker
+        shown = acted = False
         try:
-            for ev in runtime.run(message, SESSION["id"], system):
-                if ev.get("t") == "complete" and runtime.valid_session(ev.get("session_id")):
-                    SESSION["id"] = ev["session_id"]
-                if ev.get("t") == "error":
+            for ev in runtime.run(message, SESSION["id"], commands.system_prompt(), context or None):
+                kind = ev.get("t")
+                if kind in ("delta", "complete"):
+                    text, found = tags.feed(ev["text"]) if kind == "delta" else tags.flush()
+                    for tag, payload in found:
+                        done = _memory_tag(tag, payload)
+                        if done:
+                            acted = True
+                            emit(done)
+                    if text:
+                        shown = True
+                        emit(dict(t="delta", text=text))
+                    if kind == "delta":
+                        continue
+                    if acted and not shown:
+                        emit(dict(t="delta", text="[crisp] Noted."))   # the reply was only a tag
+                    if runtime.valid_session(ev.get("session_id")):
+                        SESSION["id"] = ev["session_id"]
+                        SESSION["mem"] = memory.memories_signature()
+                if kind == "error":
                     SESSION["id"] = None
                 emit(ev)
         except (BrokenPipeError, ConnectionResetError):
@@ -228,6 +279,24 @@ class Handler(BaseHTTPRequestHandler):
                 emit(dict(t="error", message=str(e)[:300]))
             except OSError:
                 pass
+
+
+def _memory_tag(kind, payload):
+    """Carry out one <remember>/<forget> tag from Claude's reply and say what
+    happened, for the HUD's log and graph."""
+    if commands.MEMORY == "off":
+        return None
+    try:
+        if kind == "remember":
+            held, created = memory.remember(payload)
+            return dict(t="memory", action="saved" if created else "known",
+                        id=held["id"], title=held["title"])
+        gone = memory.forget(payload)
+        if gone:
+            return dict(t="memory", action="forgotten", id=gone["id"], title=gone["title"])
+        return dict(t="memory", action="unmatched", title=payload[:80])
+    except (ValueError, OSError) as e:
+        return dict(t="note", message=f"memory: {str(e)[:120]}")
 
 
 def main():
@@ -248,6 +317,8 @@ def main():
   open         http://localhost:{PORT}
 """, flush=True)
     srv = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+    if kind == "claude":
+        runtime.prewarm(None, commands.system_prompt())   # first question finds it already up
     if os.environ.get("JARVIS_OPEN", "1") != "0":
         webbrowser.open(f"http://localhost:{PORT}")
     try:

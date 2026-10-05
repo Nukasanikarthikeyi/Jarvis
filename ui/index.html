@@ -9,6 +9,9 @@
 </head>
 <body class="boot">
 
+<!-- days of the month along the top edge, today lit: filled in by hud.js -->
+<div class="daystrip" id="dayStrip" aria-hidden="true"></div>
+
 <header class="topbar">
   <div class="brand">
     <div class="reactor-mini"><span></span></div>
@@ -18,6 +21,32 @@
     </div>
     <span class="demo-badge" id="demoBadge">DEMO</span>
   </div>
+
+  <!-- ring gauges. Date and clock are local; the three small ones mirror the
+       telemetry in the Action Log, so they are hidden from screen readers. -->
+  <div class="gauges" aria-hidden="true">
+    <div class="gauge big" title="Today — the ring is how far through the month it is">
+      <svg viewBox="0 0 100 100"><circle class="g-rim" cx="50" cy="50" r="47.5"/><circle class="g-track" cx="50" cy="50" r="39"/><circle class="g-arc" id="gDateArc" cx="50" cy="50" r="39"/><circle class="g-dash" cx="50" cy="50" r="30"/></svg>
+      <div class="gtext"><span id="gMonth"></span><b id="gDay"></b></div>
+    </div>
+    <div class="gauge opt" title="Notes showing in the graph, out of the whole vault">
+      <svg viewBox="0 0 100 100"><circle class="g-rim" cx="50" cy="50" r="47.5"/><circle class="g-track" cx="50" cy="50" r="39"/><circle class="g-arc" id="gVaultArc" cx="50" cy="50" r="39"/></svg>
+      <div class="gtext"><b id="gVault">—</b><span>Vault</span></div>
+    </div>
+    <div class="gauge opt" title="Tokens used by the last reply — full ring is 1,000">
+      <svg viewBox="0 0 100 100"><circle class="g-rim" cx="50" cy="50" r="47.5"/><circle class="g-track" cx="50" cy="50" r="39"/><circle class="g-arc" id="gTokensArc" cx="50" cy="50" r="39"/></svg>
+      <div class="gtext"><b id="gTokens">—</b><span>Tokens</span></div>
+    </div>
+    <div class="gauge opt" title="Time the last reply took — full ring is 10 seconds">
+      <svg viewBox="0 0 100 100"><circle class="g-rim" cx="50" cy="50" r="47.5"/><circle class="g-track" cx="50" cy="50" r="39"/><circle class="g-arc" id="gLatencyArc" cx="50" cy="50" r="39"/></svg>
+      <div class="gtext"><b id="gLatency">—</b><span>Latency</span></div>
+    </div>
+    <div class="gauge big" title="Local time — the ring is the seconds">
+      <svg viewBox="0 0 100 100"><circle class="g-rim" cx="50" cy="50" r="47.5"/><circle class="g-track" cx="50" cy="50" r="39"/><circle class="g-arc" id="gClockArc" cx="50" cy="50" r="39"/><circle class="g-dash" cx="50" cy="50" r="30"/></svg>
+      <div class="gtext"><b id="gClock"></b><span id="gSec"></span></div>
+    </div>
+  </div>
+
   <div class="pills">
     <div class="pill"><i class="dot ok"></i><span>Gateway</span><b id="pGateway">booting</b></div>
     <div class="pill"><i class="dot ok"></i><span>Brain</span><b id="pBrain">Claude CLI</b></div>
@@ -59,19 +88,44 @@
     </div>
 
     <div class="canvaswrap">
-      <div class="reactor-halo"></div>
+      <!-- arc-reactor frame behind the node cloud: rings, tick scales, one red arc -->
+      <svg class="reactor" viewBox="0 0 600 600" aria-hidden="true">
+        <defs>
+          <radialGradient id="rxCore">
+            <stop offset="0" stop-color="#9ff8ff" stop-opacity=".34"/>
+            <stop offset=".45" stop-color="#19e8f2" stop-opacity=".13"/>
+            <stop offset="1" stop-color="#19e8f2" stop-opacity="0"/>
+          </radialGradient>
+        </defs>
+        <circle class="rx core" cx="300" cy="300" r="150"/>
+        <circle class="rx thin" cx="300" cy="300" r="293"/>
+        <circle class="rx ticks" cx="300" cy="300" r="281"/>
+        <g class="spin"><circle class="rx seg" cx="300" cy="300" r="258"/></g>
+        <circle class="rx thin" cx="300" cy="300" r="240"/>
+        <circle class="rx accent" cx="300" cy="300" r="229"/>
+        <g class="spin rev"><circle class="rx seg2" cx="300" cy="300" r="205"/></g>
+        <circle class="rx ticks fine" cx="300" cy="300" r="178"/>
+        <circle class="rx thin" cx="300" cy="300" r="152"/>
+        <g class="spin fast"><circle class="rx seg3" cx="300" cy="300" r="126"/></g>
+        <circle class="rx thin" cx="300" cy="300" r="96"/>
+      </svg>
       <canvas id="graph"></canvas>
       <div class="corestate" id="coreState"><b>STANDBY</b><span>awaiting uplink</span></div>
     </div>
 
     <section class="convo" id="convo">
-      <h2>Conversation <em id="convoCount"></em></h2>
+      <h2><span>Conversation <em id="convoCount"></em></span>
+        <button id="btnConvoClose" class="convoclose" title="Close conversation" aria-label="Close conversation">✕</button></h2>
       <div class="transcript" id="transcript"></div>
     </section>
 
     <div class="askbar">
       <span class="asklabel">Ask</span>
       <input id="ask" autocomplete="off" placeholder="“plan my day”">
+      <button id="btnConvo" class="convobtn" title="Show conversation" aria-label="Show conversation" aria-expanded="false">
+        <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path d="M4 5h16v11H9.5L5 19.5V16H4z"/></svg>
+        <i class="badge" id="convoBadge"></i>
+      </button>
       <button id="btnMic" class="mic" title="Live voice — click to start hands-free">🎙 Live</button>
       <button id="btnSend" class="send">Transmit ▸</button>
     </div>
@@ -87,18 +141,38 @@
     <section class="panel dialpanel">
       <div class="dial" id="dial">
         <svg viewBox="0 0 200 200" class="dialsvg">
-          <circle cx="100" cy="100" r="86" class="ring base"/>
-          <circle cx="100" cy="100" r="86" class="ring sweep" id="dialSweep"/>
-          <circle cx="100" cy="100" r="70" class="ring inner"/>
+          <circle cx="100" cy="100" r="74" class="ring base"/>
+          <circle cx="100" cy="100" r="74" class="ring sweep" id="dialSweep"/>
+          <circle cx="100" cy="100" r="58" class="ring inner"/>
           <g id="ticks"></g>
         </svg>
-        <div class="dialtext">J.A.R.V.I.S.</div>
+        <!-- the speaker: its cone moves with the level of JARVIS's own voice (hud.js) -->
+        <svg viewBox="0 0 200 200" class="speaker" aria-hidden="true">
+          <defs>
+            <radialGradient id="spkGrad">
+              <stop offset="0" stop-color="#01212a"/>
+              <stop offset=".62" stop-color="#06323e"/>
+              <stop offset="1" stop-color="#0b5a69"/>
+            </radialGradient>
+          </defs>
+          <circle class="spk-wave" cx="100" cy="100" r="50"/>
+          <circle class="spk-wave late" cx="100" cy="100" r="50"/>
+          <g class="spk-cone" id="spkCone">
+            <circle class="spk-surround" cx="100" cy="100" r="50"/>
+            <circle class="spk-body" cx="100" cy="100" r="41"/>
+            <circle class="spk-ridge" cx="100" cy="100" r="29"/>
+            <circle class="spk-cap" cx="100" cy="100" r="14"/>
+          </g>
+        </svg>
       </div>
-      <div class="voicestate"><i class="dot" id="voiceDot"></i><span id="voiceState">IDLE</span></div>
-      <div class="vu"><i class="vufill" id="vuFill"></i></div>
-      <div class="tonebox"><span>delivery</span><b id="toneNow">—</b></div>
-      <div class="saytip">say <b>“Jarvis…”</b></div>
-      <div class="clibadge" id="cliBadge">CLAUDE CLI</div>
+      <div class="dialinfo">
+        <div class="dialtext">J.A.R.V.I.S.</div>
+        <div class="voicestate"><i class="dot" id="voiceDot"></i><span id="voiceState">IDLE</span></div>
+        <div class="vu"><i class="vufill" id="vuFill"></i></div>
+        <div class="tonebox"><span>delivery</span><b id="toneNow">—</b></div>
+        <div class="saytip">say <b>“Jarvis…”</b></div>
+        <div class="clibadge" id="cliBadge">CLAUDE CLI</div>
+      </div>
     </section>
 
     <section class="panel grow">
@@ -118,5 +192,6 @@
 
 <script src="graph.js"></script>
 <script src="app.js"></script>
+<script src="hud.js"></script>
 </body>
 </html>

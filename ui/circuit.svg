@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" preserveAspectRatio="xMidYMid slice" fill="none" stroke="#19e8f2" stroke-linecap="round" stroke-linejoin="round">
+  <!-- Backdrop for the JARVIS HUD: circuit traces with 45-degree elbows, the
+       nodes they end on, two heavy bars down the left edge, and a little dust. -->
+  <defs>
+    <filter id="soft" x="-200%" y="-200%" width="500%" height="500%"><feGaussianBlur stdDeviation="2.4"/></filter>
+  </defs>
+
+  <g stroke-width="1" opacity=".2">
+    <path d="M0 236 H170 L214 280 H520 L556 244 H760"/>
+    <path d="M0 256 H150 L200 306 H470"/>
+    <path d="M1600 208 H1384 L1344 248 H1128 L1094 282 H984"/>
+    <path d="M1600 228 H1404 L1368 264 H1210"/>
+    <path d="M1600 566 H1424 L1382 524 H1184"/>
+    <path d="M0 612 H238 L288 662 H604 L642 700 H830"/>
+    <path d="M0 632 H218 L262 676 H420"/>
+    <path d="M304 900 V784 L344 744 H530"/>
+    <path d="M1252 900 V806 L1212 766 H1044 L1002 724 H904"/>
+    <path d="M702 0 V72 L742 112 H902 L940 150 V196"/>
+    <path d="M1102 0 V58 L1062 98 H962"/>
+    <path d="M420 0 V96 L460 136 H610"/>
+    <path d="M1600 720 H1470 L1430 760 H1300"/>
+    <path d="M610 900 V842 L650 802 H780 L812 770"/>
+    <path d="M960 900 V850 L992 818 H1120"/>
+  </g>
+
+  <g stroke-width="1" opacity=".1">
+    <path d="M0 420 H96 L132 456 H250"/>
+    <path d="M1600 400 H1500 L1462 438 H1360"/>
+    <path d="M800 0 V40"/>
+    <path d="M0 150 H70 L104 116 H260"/>
+    <path d="M1600 860 H1520 L1486 826 H1400"/>
+  </g>
+
+  <g fill="#19e8f2" stroke="none" opacity=".5">
+    <circle cx="760" cy="244" r="3"/><circle cx="470" cy="306" r="2.5"/>
+    <circle cx="984" cy="282" r="3"/><circle cx="1210" cy="264" r="2.5"/>
+    <circle cx="1184" cy="524" r="3"/><circle cx="830" cy="700" r="3"/>
+    <circle cx="420" cy="676" r="2.5"/><circle cx="530" cy="744" r="3"/>
+    <circle cx="904" cy="724" r="3"/><circle cx="940" cy="196" r="3"/>
+    <circle cx="962" cy="98" r="2.5"/><circle cx="610" cy="136" r="2.5"/>
+    <circle cx="1300" cy="760" r="2.5"/><circle cx="812" cy="770" r="2.5"/>
+    <circle cx="1120" cy="818" r="2.5"/><circle cx="250" cy="456" r="2"/>
+    <circle cx="1360" cy="438" r="2"/><circle cx="260" cy="116" r="2"/>
+    <rect x="1396" y="822" width="7" height="7"/><rect x="796" y="38" width="7" height="7"/>
+  </g>
+
+  <g stroke-width="5" opacity=".22">
+    <path d="M30 196 V676"/>
+    <path d="M44 330 V560"/>
+  </g>
+
+  <g fill="#9ff8ff" stroke="none" filter="url(#soft)">
+    <circle cx="372" cy="182" r="3" opacity=".55"/><circle cx="1236" cy="150" r="2.4" opacity=".5"/>
+    <circle cx="566" cy="560" r="2.2" opacity=".4"/><circle cx="1090" cy="640" r="3" opacity=".5"/>
+    <circle cx="1470" cy="330" r="2.4" opacity=".45"/><circle cx="150" cy="780" r="2.6" opacity=".45"/>
+    <circle cx="880" cy="820" r="2" opacity=".4"/><circle cx="700" cy="380" r="2" opacity=".35"/>
+    <circle cx="1330" cy="610" r="2" opacity=".4"/><circle cx="240" cy="360" r="2" opacity=".35"/>
+  </g>
+</svg>

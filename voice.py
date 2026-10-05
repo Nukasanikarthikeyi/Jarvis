@@ -26,6 +26,10 @@ TTS_URL = os.environ.get("FISH_AUDIO_TTS_URL", "https://api.fish.audio/v1/tts")
 ASR_URL = os.environ.get("FISH_AUDIO_ASR_URL", "https://api.fish.audio/v1/asr")
 MODEL = os.environ.get("FISH_AUDIO_MODEL", "s2.1-pro-free")
 VOICE_ID = os.environ.get("FISH_AUDIO_VOICE_ID", "").strip()
+# "normal" makes Fish finish the whole clip before it sends a byte (~4s for one
+# sentence). "balanced" sends audio as it is synthesised, first byte in ~0.4s,
+# which is what lets JARVIS start talking while the rest is still rendering.
+LATENCY = os.environ.get("FISH_AUDIO_LATENCY", "balanced").strip().lower() or "balanced"
 
 # ── local speech-to-text ────────────────────────────────────────
 # Listening is the one thing Fish Audio charges for, and the browser's own
@@ -129,15 +133,16 @@ def describe():
     return f"Fish Audio · {MODEL}" + (f" · {VOICE_ID[:8]}…" if VOICE_ID else " · default voice")
 
 
-def speak(text):
-    """Returns mp3 bytes, or raises. The caller decides what to do on failure."""
+def speak_stream(text):
+    """Yields mp3 chunks as Fish synthesises them. Raises on the first step if
+    the request is refused, so the caller can still answer with an error."""
     if not available():
         raise RuntimeError("no FISH_AUDIO_API_KEY — browser voice is handling this")
     text = (text or "").strip()
     if not text:
         raise ValueError("empty text")
 
-    payload = {"text": text[:2500], "format": "mp3", "latency": "normal"}
+    payload = {"text": text[:2500], "format": "mp3", "latency": LATENCY}
     if VOICE_ID:
         payload["reference_id"] = VOICE_ID
 
@@ -150,9 +155,18 @@ def speak(text):
         })
     try:
         with urllib.request.urlopen(req, timeout=45) as r:
-            return r.read()
+            while True:
+                chunk = r.read1(16384)
+                if not chunk:
+                    return
+                yield chunk
     except urllib.error.HTTPError as e:
         raise RuntimeError(f"Fish Audio TTS HTTP {e.code}: {e.read(400).decode('utf-8','replace')}") from e
+
+
+def speak(text):
+    """Returns mp3 bytes, or raises. The caller decides what to do on failure."""
+    return b"".join(speak_stream(text))
 
 
 def transcribe(audio, mime="audio/webm"):

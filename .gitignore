@@ -4,6 +4,11 @@ __pycache__/
 *.pyc
 raw-*.log
 
+# What JARVIS has been told to remember is personal. It stays on this machine
+# rather than going to the remote with the rest of the vault.
+vault/memory/
+vault/.trash/
+
 # skills installer writes a symlink farm per agent; keep .agents (real content)
 # plus .claude (what Claude Code reads) and drop the rest
 .hermes/

@@ -54,8 +54,14 @@ def update_state(mutator):
         return result
 
 
-def context_block(message=""):
-    """Dashboard state + the vault notes relevant to this turn."""
+def context_block(message="", with_memories=True):
+    """Dashboard state + the vault notes relevant to this turn. It changes every
+    turn, so it travels with the user message; system_prompt() below is the one
+    fixed part, set when the long-lived claude process starts.
+
+    The long-term memories go in once per conversation and again whenever they
+    change (the server decides), not on every turn: the conversation keeps
+    them, and repeating the whole list each time only burns tokens."""
     d = load()
     out = []
     if d["profile"]:
@@ -67,7 +73,9 @@ def context_block(message=""):
     open_tasks = [t for t in d["tasks"] if not t.get("done")]
     if open_tasks:
         out.append("## Mission queue\n" + "\n".join(f"- {t['text']}" for t in open_tasks[:20]))
-    out.append(VOICE_DIRECTION)
+    held = memory.memories_block() if with_memories and MEMORY != "off" else ""
+    if held:
+        out.append(held)
     recall = memory.context_for(message)
     if recall:
         out.append(recall)
@@ -87,6 +95,49 @@ than that reads as noise.
 Keep replies short and spoken, not written: no bullet points, no markdown, no
 headings, no emoji. Numbers in words when they are said aloud. Dry understatement
 over enthusiasm."""
+
+
+# ── long-term memory ─────────────────────────────────────────────
+# auto: save when asked, and when the operator shares something lasting.
+# ask:  save only when asked.   off: no long-term memory at all.
+MEMORY = os.environ.get("JARVIS_MEMORY", "auto").strip().lower()
+if MEMORY not in {"auto", "ask", "off"}:
+    MEMORY = "auto"
+
+_WHEN_TO_SAVE = {
+    "auto": ("Do this when the operator asks you to remember something, and when they tell you\n"
+             "a lasting fact about themselves, their people, their preferences or their plans."),
+    "ask": "Do this only when the operator asks you to remember something.",
+}
+
+# Saving is a tag in the reply, not a tool call: a tool call would cost seconds
+# of silence on every memory. memory.TagFilter strips the tags before the reply
+# reaches the screen or the speaker, and the server acts on them.
+MEMORY_DIRECTION = """## Long-term memory
+You have a long-term memory that survives restarts. What it holds is given to
+you under "Long-term memory"; treat it as things you simply know.
+
+To save something, end your reply with a line of exactly this form:
+<remember>one sentence that will still make sense on its own months from now</remember>
+{when}
+Use names rather than "he" or "my wife", and real dates rather than "tomorrow".
+One tag per fact. Do not save small talk, questions, what is already in memory,
+or anything that comes from the vault notes.
+
+To drop something, end your reply with:
+<forget>that memory, in its own words</forget>
+Only when the operator asks you to forget it.
+
+The tags are removed before your reply is shown or spoken, so never mention
+them: acknowledge in your own words instead. This is the only way to remember —
+do not write memory files or notes with your tools."""
+
+
+def system_prompt():
+    """The fixed part of every turn: how to speak, and how to remember."""
+    if MEMORY == "off":
+        return VOICE_DIRECTION
+    return VOICE_DIRECTION + "\n\n" + MEMORY_DIRECTION.format(when=_WHEN_TO_SAVE[MEMORY])
 
 
 # ── demo fixtures ────────────────────────────────────────────────
@@ -203,8 +254,8 @@ def demo_reply(message):
 
 # ── slash commands ───────────────────────────────────────────────
 _CMD = re.compile(
-    r"^\s*/(new|profile|goal|personality|kanban|mission|missions|recall|memory|graph|"
-    r"vault|status|commands|help|clear)\b\s*(.*)$", re.I | re.S)
+    r"^\s*/(new|profile|goal|personality|kanban|mission|missions|recall|memory|memories|"
+    r"remember|forget|graph|vault|status|commands|help|clear)\b\s*(.*)$", re.I | re.S)
 
 
 def _help():
@@ -214,6 +265,9 @@ def _help():
 /profile <fact> — remember something about you
 /personality <tone> — adjust delivery
 /mission [task] — read or add to the mission queue
+/remember <fact> — keep it in long-term memory
+/memory — what is in long-term memory (/memory <query> searches the vault)
+/forget <memory> — drop one memory
 /recall <query> — search the memory vault
 /graph — rebuild the memory graph from disk
 /vault — where the vault lives and how big it is
@@ -255,6 +309,47 @@ def handle(message, runner=None):
         return dict(message=None, note="vault reloaded", graph=True, reply=(
             f"Vault at {g['vault']} — {g['total']} notes, {len(g['links'])} links. "
             f"Top hub: {g['hubs'][0]['title']} ({g['hubs'][0]['degree']} connections)."))
+
+    if cmd == "remember":
+        if not arg:
+            return dict(message=None, reply="Tell me what to remember.", note="memory")
+        try:
+            held, created = memory.remember(arg)
+        except ValueError:
+            return dict(message=None, reply="There is nothing there to remember.", note="memory")
+        if created:
+            return dict(message=f'Saved to long-term memory: "{held["text"]}". '
+                                "It is saved already, so do not save it again. "
+                                "Acknowledge in one short line.",
+                        note="memory saved",
+                        memory=dict(action="saved", id=held["id"], title=held["title"]))
+        return dict(message=None, note="memory known",
+                    reply=f"[dry] I already have that. {held['text']}",
+                    memory=dict(action="known", id=held["id"], title=held["title"]))
+
+    if cmd == "forget":
+        if not arg:
+            return dict(message=None, reply="Tell me which memory to drop.", note="memory")
+        gone = memory.forget(arg)
+        if gone is None:
+            return dict(message=None, note="memory unmatched",
+                        reply="[measured] I could not tell which memory you meant. "
+                              "Say slash memory to hear what I am holding.",
+                        memory=dict(action="unmatched", title=arg[:80]))
+        return dict(message=None, note="memory forgotten",
+                    reply=f"[crisp] Forgotten. {gone['text']}",
+                    memory=dict(action="forgotten", id=gone["id"], title=gone["title"]))
+
+    if cmd == "memories" or (cmd == "memory" and not arg):
+        held = memory.memories()
+        if not held:
+            return dict(message=None, note="memory read",
+                        reply="[measured] Nothing in long-term memory yet. "
+                              "Tell me to remember something and I will.")
+        count = "one memory" if len(held) == 1 else f"{len(held)} memories"
+        return dict(message=None, note="memory read", focus=held[0]["title"],
+                    reply=f"[measured] I am holding {count}.\n"
+                          + "\n".join(m["text"] for m in held[:12]))
 
     if cmd in ("recall", "memory"):
         if not arg:
