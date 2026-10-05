@@ -55,6 +55,38 @@ Then open <http://localhost:8720>.
 Requirements: Python 3.9+ and Claude Code on your PATH. No pip installs — the
 whole server is standard library.
 
+## As a Mac app
+
+```bash
+jarvis-app/build.sh     # builds ~/Applications/JARVIS HUD.app
+```
+
+`JARVIS HUD.app` is the HUD in a window of its own. Opening it starts the
+server if it is not already running, and quitting it stops the server again
+(only if the app was the one that started it). It needs the Xcode Command Line
+Tools to build and nothing else; the app remembers where this project folder
+is, so build it again if you move the folder.
+
+In the app the speaker in the voice dial throbs while JARVIS talks rather than
+following the exact level — that needs a browser feature the system web view
+does not have. Everything else is the same as in Chrome.
+
+## Use the vault from other apps
+
+`jarvis-app/mcp_server.py` is an MCP server for the vault and the long-term memory:
+search notes, read one, list what JARVIS remembers, remember, forget. Any MCP
+client can use it — the *Jarvis - AI Assistant* desktop app, Claude Code,
+Claude Desktop. Standard library only; it reads the vault files directly, so
+the HUD does not have to be running.
+
+```json
+{ "mcpServers": { "jarvis-vault": {
+    "command": "/usr/bin/python3",
+    "args": ["/path/to/this/project/jarvis-app/mcp_server.py"] } } }
+```
+
+A memory saved through it is the same note the HUD shows in its graph.
+
 ## The vault
 
 `vault/*.md`. Frontmatter sets the type, wiki links make the edges:
@@ -237,6 +269,9 @@ runtime.py     keeps one `claude -p` alive, stream-json in and out
 memory.py      vault -> graph, recall, per-turn context, long-term memory
 commands.py    slash commands + demo fixtures
 voice.py       Fish Audio TTS/STT (optional)
+jarvis-app/    what ties JARVIS to the rest of the Mac:
+               build.sh + JarvisHUD.swift + make_icon.swift — JARVIS HUD.app, the HUD in its own window
+               mcp_server.py — the vault and long-term memory as an MCP server, for other apps
 seed_vault.py  writes the sample vault
 ui/            index.html · styles.css · app.js · graph.js
                hud.js (day strip, ring gauges, the speaker that moves with the voice) · circuit.svg
